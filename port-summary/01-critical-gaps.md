@@ -1,0 +1,3 @@
+# Critical / Non-functional Gaps
+
+No unresolved gaps remain. All critical issues (fallback proxy mechanism, list-countries/list-proxies commands, tunnels null, trial port logic, Opera provider init, `--test` flag, HTTP request forwarding through CONNECT tunnel, `\r\n\r\n` header terminator scan, connection pool addressing) have been fixed. See [07-pitfalls.md](07-pitfalls.md) for the full record of resolved issues.
