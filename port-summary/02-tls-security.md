@@ -127,4 +127,4 @@ Java's approach (`HolaApiClient.java:226-234`) uses `SSLParameters.setServerName
 | `-cafile` flag support | Loaded into cert pool, applied to all TLS | Parsed but unused | **Missing** |
 | `hideSNI` + cert verify combo | Separate SNI/verify names via `VerifyConnection` | Reflection `setServerNames(emptyList())`, no verify | **Implemented but fragile** |
 | Network validation (tcp only) | Rejects non-TCP in `DialContext` | Missing in `OutboundProxyDialer`/`ProxyDialer` | **Missing** |
-| Context cancellation | `context.Context` throughout | Not supported | **Missing** — see 07-pitfalls.md for tunnel-level timeout |
+| Context cancellation | `context.Context` throughout | Not supported | **Partial** — see 07-pitfalls.md for tunnel-level CountDownLatch timeout (120s) |

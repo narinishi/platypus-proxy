@@ -92,3 +92,158 @@ The initial `--test file` implementation failed with Opera because the old `Conn
 |------|----------|--------|
 | `--test ip` | Opera | 200 OK, `{"ip":"77.111.247.x"}` |
 | `--test file` | Opera | 200 OK, 10.00 MB downloaded |
+
+---
+
+## Enhancement 6: Refresh Scheduling
+
+Fixed refresh scheduling in the Opera provider to match Hola patterns and prevent resource leaks.
+
+### Files modified
+
+- `OperaProvider.java:132` — changed `scheduleAtFixedRate` to `scheduleWithFixedDelay` to prevent overlapping executions (matches Hola pattern, pitfall #37 fix)
+- `OperaProvider.java` — removed separate "opera-refresh" executor; Opera now uses the "provider-refresh" scheduler passed by `ProxyApplication`, eliminating the executor resource leak
+- `OperaProvider.java` — added `refreshMs <= 0` guard to skip scheduling when `--rotate` is set to 0 or negative
+- `OperaProvider.java` — set `refreshIntervalMs` on the `ProviderSession` to `refreshMs` (was hardcoded to `0` for Opera, which was a bug)
+
+**Date fixed:** 2026-05-08
+
+---
+
+## Enhancement 7: Health Endpoint
+
+Added a `/health` HTTP endpoint for health checks, absent from the Go original.
+
+### New file
+
+- `handler/HealthHandler.java` — Grizzly `HttpHandler` that returns HTTP 200 with body `"OK"` for any request to `/health`.
+
+### Files modified
+
+- `ProxyApplication.java` — registers the `HealthHandler` at the `/health` path on the Grizzly server.
+
+---
+
+## Enhancement 8: `--direct-dns` CLI Flag
+
+Added `--direct-dns` flag to resolve domain names directly via DoH (1.1.1.1, 8.8.8.8) instead of relying on the proxy. Not present in the Go original.
+
+### Files modified
+
+- `CLIArgs.java` — added `-direct-dns` boolean flag (default `false`), with `isDirectDns()` getter and help text.
+- `ProxyApplication.java` — when `directDns` is true, uses `AdvancedResolver` (DoH-based) instead of `DnsResolverFactory.fastResolverFromUrls`.
+
+---
+
+## Enhancement 9: Graceful Shutdown and Shutdown Hook
+
+Added a shutdown hook and graceful `Grizzly` server lifecycle management, improving upon the Go original's bare `http.ListenAndServe`.
+
+### Files modified
+
+- `ProxyApplication.java` — added `volatile boolean running` flag, `Runtime.getRuntime().addShutdownHook` that calls `server.shutdown()`, and a `while` loop in `main()` that polls the running flag. The `finally` block shuts down both the Grizzly server and the refresh scheduler. This ensures clean teardown on SIGINT/SIGTERM.
+
+---
+
+## Enhancement 10: AsyncLog — Asynchronous Logging Wrapper
+
+Added an asynchronous logging utility that prevents logging I/O from blocking request-handling threads. Not present in the Go original.
+
+### New file
+
+- `AsyncLog.java` — `com.example.proxy` package. Wraps `java.util.logging.Logger` with logging offloaded to a single-thread background executor. Provides `log(Level, String)` and `log(Level, String, Throwable)` methods, plus `reset(Level)` for runtime log level reconfiguration.
+
+### Why
+
+Go's `LogWriter` (in `logwriter.go`) uses a buffered channel (capacity 128) with a background goroutine for async log output. Java's `AsyncLog` provides equivalent behavior, preventing format-heavy log statements from blocking proxy request processing.
+
+---
+
+## Enhancement 11: SOCKS5 Outbound Proxy Support
+
+Added full SOCKS5 (RFC 1928/1929) support for the `--proxy` outbound proxy flag. Go documents `socks5`/`socks5h` schemes in help text but **does not implement them** — only `http` and `https` are registered with `xproxy`.
+
+### New file
+
+- `Socks5ProxyDialer.java` — `com.example.proxy.dialer` package. Implements `ContextDialer` with:
+  - SOCKS5 handshake (RFC 1928 §3)
+  - GSSAPI and username/password authentication (RFC 1929)
+  - TCP connect command — resolves DNS locally for `socks5://`, delegates to proxy for `socks5h://`
+  - UDP associate command support
+  - Bound address/port extraction
+
+### Files modified
+
+- `OutboundProxyDialer.java` — the `ProxyDialerFromURL` method now handles `socks5` and `socks5h` URL schemes in its switch statement, creating a `Socks5ProxyDialer` for these schemes.
+
+---
+
+## Enhancement 12: TunnelSocket — PushbackInputStream Wrapper
+
+Added a `TunnelSocket` wrapper that prevents CONNECT response bytes from being lost during tunnel establishment. Not present in Go.
+
+### New file
+
+- `TunnelSocket.java` — `com.example.proxy` package. Extends `Socket` with:
+  - `getInputStream()` returns a `PushbackInputStream` wrapping the underlying socket's input stream
+  - Any bytes read-ahead during CONNECT response parsing can be pushed back for the caller to re-read
+
+### Why
+
+Go's `ProxyDialer.DialContext` uses a one-off `readResponse()` that reads byte-by-byte from the raw `net.Conn` — no buffered pushback needed because the same function both reads the response and returns the conn. In Java, the CONNECT response is parsed in `ProxyDialer`, but the caller (connection pool, HTTP handler) reads from the returned socket. Without `PushbackInputStream`, any bytes read during CONNECT parsing would be lost.
+
+---
+
+## Enhancement 13: gzip/deflate HTTP Response Decompression
+
+Added automatic decompression of gzip/deflate-encoded HTTP responses from the Hola API. Not present in Go.
+
+### Files modified
+
+- `HolaApiClient.java` (lines 143-172) — after reading the raw HTTP response body, checks the `Content-Encoding` header:
+  - `gzip` — wraps response bytes in `GZIPInputStream`
+  - `deflate` — wraps response bytes in `InflaterInputStream`
+  - Other / absent — returns raw bytes as-is
+
+### Why
+
+Go's `do_req` reads response body via `ioutil.ReadAll` with no decompression and no `Accept-Encoding` header. If the Hola API returns compressed responses (which it may depending on request headers), Go's code would receive compressed bytes. Java handles both cases transparently.
+
+---
+
+## Enhancement 14: FixedEndpointDialer — Separate Request Dialer
+
+Extracted the plain HTTP request dialer into its own class for clarity and reuse. Not a separate abstraction in Go.
+
+### New file
+
+- `FixedEndpointDialer.java` — `com.example.proxy.dialer` package. Implements `ContextDialer`:
+  - Always connects to a fixed proxy endpoint address (host:port)
+  - Optionally wraps the connection in TLS
+  - Used by `ProxyHandler` for non-CONNECT HTTP proxy requests
+
+### Why
+
+Go configures the request dialer inline in `http.Transport.DialContext` — a function literal captures the endpoint address and base dialer. Java's approach extracts this into its own class for testability and separation of concerns.
+
+---
+
+## Enhancement 15: AdvancedResolver DNS Enhancements
+
+Added multiple DNS resolution enhancements to `AdvancedResolver` that are absent from Go's `dnsresolver.go`:
+
+### Files modified
+
+- `AdvancedResolver.java` — `com.example.proxy.resolver` package
+
+### Features
+
+| Feature | Description | Go equivalent |
+|---------|-------------|---------------|
+| DNSSEC DO bit | Sets EDNS(0) DNSSEC OK flag in DNS queries | Not set |
+| CNAME chasing | Follows CNAME chains up to depth 5, with loop detection and per-name result caching | No chasing |
+| Stale-while-revalidate cache | Serves stale entries within 1-hour window while triggering background refresh | No caching |
+| Negative DNS caching | Caches NXDOMAIN responses using SOA minimum TTL, with min/max clamping | No caching |
+| Semaphore-limited concurrency | Max 10 concurrent DoH requests via `Semaphore` (up to 3 retries after 100ms) | Unlimited goroutines |
+| Dedicated retry executor | Separate `ScheduledExecutorService` for retry tasks (prevents blocking cache maintenance) | N/A |
+| LRU cache eviction | Sorts by last-access time, evicts oldest when cache exceeds 1024 entries | N/A |
